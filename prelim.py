@@ -225,7 +225,7 @@ def prelim1():
 
     with torch.no_grad():
         siren.eval()
-        superres_factor = 1
+        superres_factor = 10
         new_height = train_img.shape[0] * superres_factor
         new_width = train_img.shape[1] * superres_factor
         out_img = np.zeros((new_height, new_width))
