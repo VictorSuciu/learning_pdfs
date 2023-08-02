@@ -72,22 +72,56 @@ class ImageHoldoutDataset(ImageDataset):
 
         return self.norm_include_coords[i], self.step_area * self.include_vals[i]
 
+def pdf_auc_loss(siren, full_img_loader, step_area):
+    preds = None
+    for batch_in, batch_out in full_img_loader:
+        if preds == None:
+            preds = torch.sum(siren(batch_in))
+        else:
+            preds += torch.sum(siren(batch_in))
+    auc = (1 - torch.sum(preds) * step_area) ** 2
+    return auc
 
-def training_loop(siren, img_loader, epochs=10, lr=0.001):
-    objective = nn.MSELoss()
+
+def kl_divergence(pred, label):
+    eps = 1e-7
+    return torch.sum(pred * (torch.log(pred + eps) - torch.log(label + eps)))
+
+
+def training_loop(siren, img_loader, full_img_loader, step_area=0, epochs=10, lr=0.001):
+    # objective = nn.MSELoss()
+    objective1 = kl_divergence
+    objective2 = nn.MSELoss()
     optimizer = torch.optim.Adam(params=siren.parameters(), lr=lr)
     
     loss_history = []
     print('training')
+
+    num_iters1 = 3
+    num_iters2 = 3
+
+    b_count = 0
+    auc_interval = 1
     for e in tqdm(range(epochs)):
+        # while img_loader_iter.has:
         for batch_in, batch_out in img_loader:
+        # for b in range(len(img_loader)):
+        #     batch_in, batch_out = next(img_loader_iter)
+            b_count += 1
             pred = siren(batch_in)
-            loss = objective(pred, batch_out)
-            loss_e = objective(pred, batch_out)
+            # loss1 = objective1(pred, batch_out)
+            loss2 = objective2(pred, batch_out)
+            loss = loss2
             loss_history.append(loss.item())
             loss.backward()
             optimizer.step()
             optimizer.zero_grad()
+
+            # if b_count % auc_interval == 0:
+            #     auc_loss = pdf_auc_loss(siren, full_img_loader, step_area)
+            #     auc_loss.backward()
+            #     optimizer.step()
+            #     optimizer.zero_grad()
 
     return loss_history
 
@@ -114,11 +148,15 @@ def training_loop_holdout(siren, img_loader, holdout_loader, epochs=10, lr=0.001
 
     return loss_history
 
-def train_siren(siren, img, ranges=None, epochs=10, batch_size=16, lr=0.001, include_frac=1, holdout_frac=0, device='cpu'):
+def train_siren(siren, img, ranges=None, step_area=0, epochs=10, batch_size=16, lr=0.001, include_frac=1, holdout_frac=0, device='cpu'):
     
+    print(f'include_frac={include_frac}')
     img_dset = ImageDataset(img, include_frac=include_frac, device=device)
-    img_dset.plot()
     img_loader = DataLoader(img_dset, batch_size=batch_size, shuffle=True)
+    img_dset.plot()
+
+    full_img_dset = ImageDataset(img, include_frac=1, device=device)
+    full_img_loader = DataLoader(full_img_dset, batch_size=batch_size, shuffle=True)
 
     if holdout_frac > 0:
         holdout_dset = ImageHoldoutDataset(img, ranges, include_frac=holdout_frac, start_idx=len(img_dset), device=device)
@@ -126,7 +164,7 @@ def train_siren(siren, img, ranges=None, epochs=10, batch_size=16, lr=0.001, inc
         holdout_loader = DataLoader(holdout_dset, batch_size=batch_size, shuffle=True)
         loss_history = training_loop_holdout(siren, img_loader, holdout_loader, epochs=epochs, lr=lr)
     else:
-        loss_history = training_loop(siren, img_loader, epochs=epochs, lr=lr)
+        loss_history = training_loop(siren, img_loader, full_img_loader, step_area=step_area, epochs=epochs, lr=lr)
     
     
     plt.plot(np.arange(len(loss_history)), loss_history)
@@ -155,9 +193,8 @@ def density_map(data, mins, maxes, step_size, window_rad):
             count = 0
             for i in range(len(data)):
                 dist = np.sqrt(np.sum((data[i] - np.array([x, y])) ** 2))
-                if dist <= window_rad:
-                # if np.abs(x - data[i, 0]) < window_rad and np.abs(y - data[i, 1]) < window_rad:
-                    dmap[i_y, i_x] = dmap[i_y, i_x] + 1
+                # if dist <= window_rad:
+                if np.abs(x - data[i, 0]) < window_rad and np.abs(y - data[i, 1]) < window_rad:
                     dmap[i_y, i_x] = dmap[i_y, i_x] + 1
             i_y += 1
         i_x += 1
@@ -171,7 +208,7 @@ def prelim1():
     data = gen_gaussians(means, vars, num_points=500)
     mins = np.min(data, axis=0) # for example: xmin, ymin
     maxes = np.max(data, axis=0) # for example: xmax, ymax
-    ranges = np.max(maxes - mins, axis=0) # for example: xmax, ymax
+    ranges = np.max((maxes + 1) - (mins - 1), axis=0) # for example: xmax, ymax
     min_range = np.amin(ranges)
 
     print(data.shape)
@@ -185,6 +222,7 @@ def prelim1():
 
     min_steps = 40
     step_size = min_range / min_steps
+    print('step_size:', step_size)
 
     window_rads = [step_size * (i + 1) for i in range(2, 3, 1)]
     # min_steps = [5, 10, 20, 40]
@@ -192,9 +230,10 @@ def prelim1():
         density_map(data, mins, maxes, step_size, rad)
         for rad in window_rads
     ]
-    dmaps = [dmap / (np.sum(dmap) * (step_size ** 2)) for dmap in dmaps]
+    dmaps = [(dmap / (np.sum(dmap) * (step_size ** 2))) for rad, dmap in zip(window_rads, dmaps)]
     
     for i, (dmap, rad) in enumerate(zip(dmaps, window_rads)):
+        print(np.sum(dmap) * (step_size ** 2))
         # plt.subplot(len(dmaps), 1, i + 1)
         plt.imshow(dmap)
         plt.colorbar()
@@ -221,7 +260,7 @@ def prelim1():
 
     train_img = dmaps[0]
     # train_siren(siren, train_img, ranges=ranges, epochs=10, batch_size=16, include_frac=0.5, holdout_frac=0.5, device='cpu')
-    train_siren(siren, train_img, epochs=10, batch_size=16, include_frac=1, device='cpu')
+    train_siren(siren, train_img, step_area=(step_size ** 2), epochs=2000, batch_size=32, lr=5e-5, include_frac=0.25, device='cpu')
 
     with torch.no_grad():
         siren.eval()
@@ -245,6 +284,7 @@ def prelim1():
                 col_i += 1
             row_i += 1
         
+        print(np.sum(out_img) * ((step_size / superres_factor) ** 2))
         plt.imshow(out_img)
         plt.colorbar()
         plt.title(f'Predicted Probability Density - super resolution x{superres_factor}')
